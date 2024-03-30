@@ -1,0 +1,1516 @@
+//----------------------------------------------------------------
+//                     DEPENDENCIES
+//----------------------------------------------------------------
+
+const vscode = require('vscode');
+const fs = require('fs');
+const path = require('path');
+const { OpenAI } = require("openai");
+const { exec } = require('child_process');
+require('dotenv').config();
+
+//----------------------------------------------------------------
+//                  GLOBAL VARIABLES
+//----------------------------------------------------------------
+const openai = new OpenAI({ apiKey: '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' });
+let test_cases = 3; // min(3,remaining_test);
+let language = "";
+let edgecases_used;
+let extra_test_case_count;
+let loadingIndicator; 
+let selectedDirectoryPath = '';
+let selectedFilePath = '';
+let generateMoreClicked;
+let fileName = '';
+let command = '';
+
+//indicator , generate more button , single registration of extension.swanai flags
+let ready_to_load=1;
+let ready_to_genmore = 1;
+let once_registered=0;
+let userId = "";
+//---------------------------------------------------------
+
+
+
+
+
+//fileName is gg.js and is global variable
+//selectedFilePath is address of gg.js
+//selectedDirectoryPath is address of directory of gg.js
+
+//UwRunPath is address of UwRun
+//UwBackPath is address of UwBack
+
+
+//data==originalcode in activate region
+
+
+
+//-----------------------------------------------------------
+
+
+
+//----------------------------------------------------------------
+//                  FETCH CLIENT INFORMATION
+//----------------------------------------------------------------
+function saveInput(context, userId) {
+  return new Promise((resolve, reject) => {
+    context.globalState.update('userId', userId).then(() => {
+      // console.log('Input saved:', userId);
+      resolve(userId);
+    }).catch(error => {
+      reject(error);
+    });
+  });
+}
+
+function retrieveInput(context) {
+  return new Promise((resolve, reject) => {
+    let retrievedInput = context.globalState.get('userId');
+    // console.log('Retrieved input:', retrievedInput);
+    if (retrievedInput === undefined) resolve("");
+    resolve(retrievedInput);
+  });
+}
+
+function showInputBoxAndSave(context) {
+  return new Promise((resolve, reject) => {
+    vscode.window.showInputBox({
+      prompt: 'Enter your token',
+      value: context.globalState.get('userId') || '' // prefill input box with saved input, if any
+    }).then(userId => {
+      if (userId !== undefined) {
+        return saveInput(context, userId).then(() => {
+          return retrieveInput(context); // Return the result of retrieveInput
+        }).catch(error => {
+          console.error('Error saving input:', error);
+          throw error; // Throw the error to reject the promise
+        });
+      } else {
+        // console.log('Input dialog was canceled');
+        return Promise.resolve(""); // Return an empty string if input is canceled
+      }
+    }).then(result => {
+      resolve(result); // Resolve the outer promise with the result
+    })
+  });
+}
+
+
+const { getDatabase, ref, get, child, update } = require("firebase/database")
+
+
+
+const { initializeApp } = require("firebase/app");
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDQhsRtbi5OC73C4hob_19BlbQ6IxsIArY",
+  authDomain: "unitwise-45edf.firebaseapp.com",
+  projectId: "unitwise-45edf",
+  storageBucket: "unitwise-45edf.appspot.com",
+  messagingSenderId: "27154364163",
+  appId: "1:27154364163:web:d390a5a5167e8ee4cf9b36",
+  measurementId: "G-DTNK3EMC8P",
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+const getPlanInfo = () => {
+  return new Promise((resolve, reject) => {
+    const dbRef = ref(db);
+    get(child(dbRef, 'plans'))
+      .then((snapshot) => {
+        if (snapshot.exists()) {
+          resolve(snapshot.val());
+        } else {
+          resolve(null); // Resolve with null when no data available
+        }
+      })
+      .catch((error) => {
+        reject(error); // Reject the promise if an error occurs
+      });
+  });
+};
+
+const getUserInfo = (userId) => {
+  return new Promise((resolve, reject) => {
+    const dbRef = ref(db);
+    get(child(dbRef, `users/${userId}`)).then((snapshot) => {
+      if (snapshot.exists()) {
+        const userInfo = snapshot.val();
+        resolve(userInfo);
+      } else {
+        // console.log("No data available");
+        resolve(null); // Resolve with null when no data available
+      }
+    }).catch((error) => {
+      console.error(error);
+      reject(error); // Reject the promise if an error occurs
+    });
+  });
+}
+
+
+const updateClientInfo = async (userId, dateSt, used_tests) => {
+
+  const userRef = ref(db, `users/${userId}/used/`);
+  // Update the data 
+  update(userRef, { [dateSt]: used_tests })
+    .then(() => {
+      // console.log("Data updated successfully!");
+    })
+    .catch((error) => {
+      console.error("Error updating data: ", error);
+    });
+}
+
+
+const getDateString = () => {
+  const currentDate = new Date();
+
+  const year = currentDate.getFullYear();
+  const month = (currentDate.getMonth() + 1).toString().padStart(2, '0'); // Month is zero-indexed
+  const day = currentDate.getDate().toString().padStart(2, '0');
+  return `${year}${month}${day}`;
+}
+
+
+
+//----------------------------------------------------------------
+//                  FORMAT THE CODE
+//----------------------------------------------------------------
+
+// PYTHON
+async function formatGeneratedCode(generatedCode) {
+  generatedCode = generatedCode.replace(/`/g, '');
+  generatedCode = generatedCode.replace(/^```python/, '').replace(/```$/, '');
+  generatedCode = generatedCode.replace(/^python\s*/, '');
+  return generatedCode;
+}
+
+// JAVASCRIPT
+async function formatGeneratedCodeJS(generatedCode) {
+  generatedCode = generatedCode.replace(/`/g, '');
+  generatedCode = generatedCode.replace(/^```javascript/, '').replace(/```$/, '');
+  generatedCode = generatedCode.replace(/^javascript\s*/, '');
+  generatedCode = generatedCode.trim();
+  return generatedCode;
+}
+
+// TYPESCRIPT
+async function formatGeneratedCodeTS(generatedCode) {
+  generatedCode = generatedCode.replace(/`/g, '');
+  generatedCode = generatedCode.replace(/^```typescript/, '').replace(/```$/, '');
+  generatedCode = generatedCode.replace(/^typescript\s*/, '');
+  generatedCode = generatedCode.trim();
+  return generatedCode;
+}
+
+// GOLANG
+async function formatGeneratedCodeGo(generatedCode) {
+  generatedCode = generatedCode.replace(/`/g, '');
+  generatedCode = generatedCode.replace(/^```go/, '').replace(/```$/, '');
+  generatedCode = generatedCode.replace(/^go\s*/, '');
+  generatedCode = generatedCode.trim();
+  return generatedCode;
+}
+// JAVA
+async function formatGeneratedCodeJava(generatedCode) {
+  generatedCode = generatedCode.replace(/`/g, '');
+  generatedCode = generatedCode.replace(/^```java/, '').replace(/```$/, '');
+  generatedCode = generatedCode.replace(/^java\s*/, '');
+  generatedCode = generatedCode.trim();
+  return generatedCode;
+}
+
+//----------------------------------------------------------------
+//                 FIX TEST CODE
+//----------------------------------------------------------------
+async function fixtestcode(generatedCode, logs, language) {
+  try {
+    const model = "gpt-3.5-turbo"; // GPT-3.5 Turbo model
+    const prompt = `Return only and only fixed code, by analyzing the following ${language} code and \n\nGenerated Code:\n${generatedCode}\n\nLogs:\n${logs},Return only and only fixed code no test no reasons nothingjust fixed code`;
+    const response = await openai.chat.completions.create({
+      model: model,
+      messages: [{ role: "system", content: prompt }],
+      max_tokens: 900,
+      temperature: 0.7,
+      n: 1
+    });
+
+    const fixedCode = response.choices[0].message.content.trim();
+    // console.log("here are we", fixedCode)
+    return fixedCode;
+  } catch (error) {
+    console.error('Error fixing test code:', error);
+    loadingIndicator.hide();
+    return 'Failed to fix test code. Please try again later.';
+  }
+}
+
+//----------------------------------------------------------------
+//                 FAILURE REASON
+//----------------------------------------------------------------
+async function analyzeFailureReasons(generatedCode, logs, language) {
+  try {
+    const model = "gpt-3.5-turbo";
+    const prompt = `Analysis of ${language} Code and Test Logs:
+
+    Generated Code:
+    ${generatedCode}
+    
+    Logs:
+    ${logs}
+    
+    Return "OK" if in logs all have Test Passed. If in logs any of the one have Test Failed, provide a clear reason for the failure in English. Do not include any code in your response.`
+        const response = await openai.chat.completions.create({
+      model: model,
+      messages: [{ role: "system", content: prompt }],
+      max_tokens: 100,
+      temperature: 0.7,
+      n: 1
+    });
+
+    const failureReasons = response.choices[0].message.content.trim();
+    return failureReasons;
+  } catch (error) {
+    console.error('Error analyzing failure reasons:', error);
+    loadingIndicator.hide();
+
+    return 'Failed to analyze failure reasons. Please try again later.';
+  }
+}
+
+//----------------------------------------------------------------
+//                       FIX CODE
+//----------------------------------------------------------------
+async function fixCode(code, generatedCode, logs, language) {
+  try {
+    const model = "gpt-3.5-turbo";
+    const prompt = `You're tasked with fixing the provided ${language} code:
+
+        
+        ${code}
+        
+        The code, when tested with the following test cases:
+        
+        \`\`\`
+        ${generatedCode}
+        \`\`\`
+        
+        Encountered the following errors:
+        
+        \`\`\`
+        ${logs}
+        \`\`\`
+        
+        
+        Your task is to provide the fixed code, ensuring it's complete and functional. Please provide the fixed code without any comments or additional text, strictly adhering to the code structure. `;
+
+    const response = await openai.chat.completions.create({
+      model: model,
+      messages: [{ role: "system", content: prompt }],
+      max_tokens: 900,
+      temperature: 0.7,
+      n: 1
+    });
+
+    const fixedCode = response.choices[0].message.content.trim();
+    return fixedCode;
+  } catch (error) {
+    console.error('Error fixing code:', error);
+    loadingIndicator.hide();
+
+    return 'Failed to fix code. Please try again later.';
+  }
+}
+//----------------------------------------------------------------
+//                      SELECT Language and then generate code
+//----------------------------------------------------------------
+
+const selectLang_generateFixtest = async (generatedCode, logs, language) => {
+  const fixTest = await fixtestcode(generatedCode, logs, language);
+  let formatFixTest = "hellor tr";
+  // console.log("language is heterr", language);
+  if (language === 'python') {
+    return formatFixTest = await formatGeneratedCode(fixTest);
+  } else if (language === 'javascript') {
+    // console.log("lang is js");
+    return formatFixTest = await formatGeneratedCodeJS(fixTest);
+    // console.log("formatfixed test", formatFixTest);
+  } else if (language === 'typescript') {
+    return formatFixTest = await formatGeneratedCodeTS(fixTest);
+  } else if (language === 'golang') {
+    return formatFixTest = await formatGeneratedCodeGo(fixTest);
+  } else if (language === 'java'){
+    return formatFixTest = await formatGeneratedCodeJava(fixTest);
+  }
+  return formatFixTest;
+}
+
+const selectLang_generateFixCode = async (code, generatedCode, logs, language) => {
+  const fixCodeResult = await fixCode(code, generatedCode, logs, language);
+  let formatFixCode = "";
+  if (language === 'python') {
+    return formatFixCode = await formatGeneratedCode(fixCodeResult);
+  } else if (language === 'javascript') {
+    // console.log(fixCodeResult);
+    return formatFixCode = await formatGeneratedCodeJS(fixCodeResult);
+  } else if (language === 'typescript') {
+    return formatFixCode = await formatGeneratedCodeTS(fixCodeResult);
+  } else if (language === 'golang') {
+    return formatFixCode = await formatGeneratedCodeGo(fixCodeResult);
+  }
+  return formatFixCode;
+}
+
+//----------------------------------------------------------------
+//                    EDGE CASE AND ITS CODE
+//----------------------------------------------------------------
+async function generateEdgeCasesAndCode(code, selectedDirectoryPath, language, selectedFilePath,UwBackPath) {
+  // loadingIndicator.hide();
+  const totalcases = test_cases + extra_test_case_count;
+  // vscode.window.showInformationMessage(`Total Test Codes Asked are :${totalcases}.`);
+
+  try {
+    // EDGE CASES
+    const prompt = `Generate ${test_cases} test cases targeting the limitations of the following code, with the intention to fail the test cases:
+    \n\n${code}
+    TRY to provide that test cases which fails the given above code
+    Please provide the test cases using hyphens, for example:
+    - Test Case: Describe the first test case here.
+    - Test Case: Describe the second test case here.
+    - Test Case: Describe the third test case here.
+    `;
+
+    const edgeCasesResponse = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [{ role: "system", content: prompt }],
+      temperature: 0.7,
+      max_tokens: 900
+    });
+    const edgeCases = edgeCasesResponse.choices[0].message.content.trim();
+
+    // EDGE CASES CODE+FORMATTING
+    // console.log(fileName + ": " + edgeCases + " " + language);
+    const codePrompt = `
+    Original Code: ${code}
+    Strict Prompt: You have an original code file named UwBack in ${language}. Provide a standalone runnable test file that imports necessary functions and classes from the UwBack file assuming UwBack file is in same directory level as of this file code . Ensure correct import syntax by importing specific classes and functions from UwBack. Avoid false imports like importing UwBack from UwBack.Use try-catch when error is expected.
+
+    Generate ${language} code suitable for testing. Use print statements for Test Passed and Test Failed. Do not include any testing frameworks. Ensure to include a main function for executing the code with the provided edge cases:
+
+    Provide code for the following ${totalcases} test cases:
+    \`\`\`
+    ${edgeCases}
+    
+    ${edgecases_used}
+    \`\`\`
+
+    Include any necessary import statements if functions need to be imported from the original file. If ${language} is Java, refrain from importing as both files are in the same directory. Keep the class name as UwRun if ${language} is Java.
+
+    Provide the code without any comments or additional text, strictly following the appropriate testing format. Ensure that the code includes a main function for execution and avoid adding trailing backticks.`;
+    console.log("Prompt :",codePrompt);
+
+    const codeResponse = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [{ role: "system", content: codePrompt }],
+      temperature: 0.7,
+      max_tokens: 900
+    });
+    let generatedCode = codeResponse.choices[0].message.content.trim();
+    let newFileName;
+    if (language === 'python') {
+      generatedCode = await formatGeneratedCode(generatedCode);
+      newFileName = 'UwRun.py';
+    } else if (language === 'javascript') {
+      generatedCode = await formatGeneratedCodeJS(generatedCode);
+      newFileName = 'UwRun.js';
+    } else if (language === 'typescript') {
+      generatedCode = await formatGeneratedCodeTS(generatedCode);
+      newFileName = 'UwRun.ts';
+    } else if (language === 'golang') {
+      generatedCode = await formatGeneratedCodeGo(generatedCode);
+      newFileName = 'UwRun.go';
+    } else if (language === 'java') {
+      generatedCode = await formatGeneratedCodeJava(generatedCode);
+      newFileName = 'UwRun.java';
+    }
+    const UwRunPath = path.join(selectedDirectoryPath, newFileName);
+    fs.writeFile(UwRunPath, generatedCode, async (err) => {
+      if (err) {
+        vscode.window.showErrorMessage(`Error writing file: ${err.message}`);
+        return;
+      }
+      vscode.window.showInformationMessage(`File ${UwRunPath} created successfully.`);
+      console.log("REACHEDD");
+      loadingIndicator.hide();
+      runCodeFile(code, edgeCases, generatedCode, UwRunPath, language, selectedFilePath,UwBackPath);
+    });
+
+  } catch (error) {
+    vscode.window.showErrorMessage('Error generating edge cases and code: ' + error.message);
+    loadingIndicator.hide();
+
+  }
+}
+
+
+//----------------------------------------------------------------
+//                      RUN CODE
+//----------------------------------------------------------------
+
+async function runCodeFile(code, edgeCases, generatedCode, UwRunPath, language, selectedFilePath,UwBackPath) {
+  // loadingIndicator.show();
+  try {
+    if (language === 'python') {
+      command = `python3 ${UwRunPath}`;
+    } else if (language === 'javascript') {
+      command = `node ${UwRunPath}`;
+    } else if (language === 'typescript') {
+      command = `ts-node ${UwRunPath}`;
+    } else if (language === 'golang') {
+      command = `go run ${UwRunPath}`;
+    } else if (language === 'java') {
+      const fileName = UwRunPath.slice(0, -5); // Remove the ".java" extension
+      const classFilePath = `${fileName}.class`; // Path to the compiled class file
+      // command = `javac ${UwRunPath} && java ${fileName}`;
+      command = `cd ${selectedDirectoryPath} && javac UwRun.java && java UwRun`;
+
+      // console.log(`${command}`);
+    } else {
+      throw new Error('Unsupported language');
+    }
+
+
+    loadingIndicator.hide();
+    ready_to_load = 1;
+    showResultsInWebView(edgeCases, generatedCode, UwRunPath, code, selectedFilePath, language,command,UwBackPath);
+
+  } catch (error) {
+    console.error('Error running code:', error);
+    loadingIndicator.hide();
+    ready_to_load = 1;
+
+
+  }
+}
+
+
+const display_login_promotion_section = async (context) => {
+
+  let htmlContent = `<!DOCTYPE html>
+      <html lang="en">
+      <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Document</title>
+      <script src="https://cdn.tailwindcss.com"></script>
+      
+      <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
+      integrity="sha512-DTOQO9RWCH3ppGqcWaEA1BIZOC6xxalwEsw9c2QQeAIftl+Vegovlnee1c9QX4TctnWMn13TZye+giMm8e2LwA=="
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+      />
+      </head>
+      <body class="bg-black font-sans leading-normal tracking-normal">
+      <!-- Navbar Section -->
+      <nav class="bg-blue-700">
+      <div class="container mx-auto px-4">
+      <div class="flex justify-between items-center py-4">
+      <div class="flex justify-center">
+      <a href="#" class="text-white font-bold text-xl flex gap-1 flex justify-center"
+      ><img
+      src="https://apiswan.github.io/downloads/unitwise-logo.png"
+      alt="image"
+      />
+      <span class="text-[25px] text-white mt-2">UnitWise</span></a
+      >
+      </div>
+      </div>
+      </div>
+      </nav>
+      
+      <!-- Hero Section -->
+      <div class="hero bg-blue-700 py-16">
+      <div class="container mx-auto text-center">
+      <h1 id="head" class="text-4xl md:text-6xl text-white leading-tight font-bold">
+      Welcome to UnitWise!
+      </h1>
+      <p class="text-xl text-white mt-4">
+      Increase code quality with automated tests.
+      </p>
+      <div class="mt-10">
+      <button id = "getStarted"
+      class="bg-white hover:bg-white text-blue-500 font-bold py-3 px-6 rounded inline-block"
+      >Get Started</button>
+      </div>
+      </div>
+      </div>
+      
+      <!-- Features Section -->
+      <div class="features bg-white py-16">
+      <div class="container mx-auto">
+      <h2 class="text-3xl md:text-4xl text-gray-800 font-bold text-center mb-8">Features</h2>
+      <div class="flex flex-wrap justify-center">
+      <div class="w-full sm:w-1/2 md:w-1/3 lg:w-1/4 px-4 mb-8">
+      <div class="bg-gray-200 rounded-lg p-6 text-center shadow-lg transition duration-300 ease-in-out transform hover:-translate-y-1 hover:scale-110">
+      <h3 class="text-xl text-gray-800 font-semibold mb-4">Feature 1</h3>
+      <p class="text-gray-600">Autonomous Bug Detection: Identify code bugs, enhancing software reliability.</p>
+      </div>
+      </div>
+      <!-- Add more features as needed -->
+      </div>
+      </div>
+      </div>
+      
+      <!-- User Friendly Interface Section -->
+      <div class="interface bg-gray-100 py-16">
+      <div class="container mx-auto">
+      <h2 class="text-3xl md:text-4xl text-gray-800 font-bold text-center mb-8">User Friendly Interface</h2>
+      <div class="flex flex-wrap justify-center">
+      <div class="w-full sm:w-full md:w-full lg:w-full px-4 mb-8">
+      <div class="bg-white rounded-lg overflow-hidden shadow-md">
+      <img src="/Public/ui.png" alt="Image 1" class="w-full h-auto">
+      </div>
+      </div>
+      <!-- Add more image sections as needed -->
+      </div>
+      </div>
+      </div>
+      
+      <!-- Call to Action Section -->
+      <div class="cta bg-blue-700 py-16">
+      <div class="container mx-auto text-center text-white">
+      <h2 class="text-3xl md:text-4xl font-bold mb-4">
+      Ready to get started?
+      </h2>
+      <p class="text-xl mb-8">
+      Sign up now and experience the power of our product!
+      </p>
+      <a id = "anotherGetStarted"
+      href="https://apiswan.com/signup" 
+      class="bg-white text-blue-700 font-bold py-3 px-8 rounded-full inline-block hover:bg-blue-600 hover:text-white"
+      >Get Started</a>
+      </div>
+      </div>
+      <script >
+      const vscode = acquireVsCodeApi(); 
+    document.getElementById('getStarted').addEventListener('click',()=>{
+      // console.log('clicked')
+      document.getElementById('anotherGetStarted').click();
+      setTimeout(()=>{
+        vscode.postMessage({
+          command: 'takeInput',
+        });
+      },4000)
+    })
+      </script>
+      </body>
+      
+      </html>
+      `;
+  const panel = vscode.window.createWebviewPanel(
+    'edgeCasesWebView',
+    'Edge Cases & Generated Code',
+    vscode.ViewColumn.Two,
+    {
+      enableScripts: true
+    }
+  );
+  panel.webview.html = htmlContent;
+  panel.webview.onDidReceiveMessage(async (message) => {
+    switch (message.command) {
+      case 'takeInput':
+        userId = await showInputBoxAndSave(context);
+        if (userId.length > 0) {
+          mainFunctionAfteruserId(context)
+          vscode.window.showInformationMessage(`Now you can close this tab and Run Unitwise`);
+        }
+        vscode.window.showInformationMessage(`Token saved ${userId} successfully`);
+        break;
+      default:
+        console.error('Unhandled message:', message);
+    }
+  });
+}
+
+const display_exhausted_plan = () => {
+  let htmlContent = `<!DOCTYPE html>
+  <html lang="en">
+  <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Plans Exhausted</title>
+      <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  
+  <body class="bg-gray-100 font-sans leading-normal tracking-normal ">
+      <div class="container mx-auto mt-8">
+          <div class="max-w-lg mx-auto bg-white shadow-md rounded-lg overflow-hidden  flex  flex-col">
+              <div class="px-6 py-4">
+                  <div class="font-bold text-xl mb-2 text-gray-800">Plans Exhausted</div>
+                  <p class="text-gray-700 text-base">
+                      It seems like your current plan's resources have been exhausted. To continue using our services,
+                      please consider upgrading your plan to unlock more resources and features.
+                  </p>
+              </div>
+              <div class="px-6 py-4">
+                  <button class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full w-full">
+                      Upgrade Plan
+                  </button>
+              </div>
+          </div>
+      </div>
+  </body>
+  
+  </html>
+  `;
+  const panel = vscode.window.createWebviewPanel(
+    'edgeCasesWebView',
+    'Edge Cases & Generated Code',
+    vscode.ViewColumn.Two,
+    {
+      enableScripts: true
+    }
+  );
+  panel.webview.html = htmlContent;
+}
+
+const mainFunctionAfteruserId = async (context) => {
+  if(userId.length==0){
+    vscode.window.showInformationMessage('Please enter a valid user id');
+    return;
+  }
+  let disposable;
+  vscode.window.showInformationMessage('Main extension');
+
+  const planInfo = await getPlanInfo();
+  let userInfo = await getUserInfo(userId);
+
+  let remaining_test = planInfo[userInfo.plan] - userInfo.used;
+
+  if (remaining_test == 0) {
+    display_exhausted_plan();
+  }
+  else {
+    if(once_registered==1){
+      userInfo = await getUserInfo(userId);
+      let dateSt = getDateString();
+      let usedtestDate = ((userInfo.used === undefined || userInfo.used[dateSt] === undefined) ? 0 : userInfo.used[dateSt]);
+      let remaining_test = planInfo[userInfo.plan] - usedtestDate;
+      test_cases = Math.min(3, remaining_test);
+
+
+
+      if (test_cases == 0) {
+        display_exhausted_plan();
+        return;
+      }
+
+      updateClientInfo(userId, dateSt, usedtestDate + test_cases);
+    }
+    else{
+    disposable = vscode.commands.registerCommand('extension.swanaitesting', async () => {
+
+
+      userInfo = await getUserInfo(userId);
+      let dateSt = getDateString();
+      let usedtestDate = ((userInfo.used === undefined || userInfo.used[dateSt] === undefined) ? 0 : userInfo.used[dateSt]);
+      let remaining_test = planInfo[userInfo.plan] - usedtestDate;
+      test_cases = Math.min(3, remaining_test);
+
+
+
+      if (test_cases == 0) {
+        display_exhausted_plan();
+        return;
+      }
+
+      updateClientInfo(userId, dateSt, usedtestDate + test_cases);
+      loadingIndicator = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left); 
+      loadingIndicator.text = "$(sync~spin) Analyzing...";
+      console.log("Before"+ready_to_load);
+        if(ready_to_load==1 && !generateMoreClicked){
+          console.log("reac");
+          // loadingIndicator.show();
+          console.log(ready_to_load);
+          ready_to_load=0;
+          generateMoreClicked = false;
+          extra_test_case_count=0;
+          edgecases_used='';
+          console.log(ready_to_load);
+
+          continueExtensionExecution();
+        }
+        else if(ready_to_load==1 && generateMoreClicked){
+          loadingIndicator.show();
+          ready_to_load=0;
+          continueExtensionExecution();
+        }
+        else{
+          
+          loadingIndicator.hide();
+          
+          vscode.window.showInformationMessage('Already Processing');
+        }
+        
+      });
+      once_registered=1;
+    }
+    
+
+    // let generateMoreClicked = false;
+
+    function continueExtensionExecution() {
+      
+      vscode.window.showInformationMessage('Unitwise started successfully.');
+// loadingIndicator.hide();
+      if (!generateMoreClicked) {
+        const activeEditor = vscode.window.activeTextEditor;
+        if (!activeEditor) {
+          loadingIndicator.hide();
+          vscode.window.showErrorMessage('No active text editor found.');
+          return;
+        }
+        // loadingIndicator.hide();
+        const document = activeEditor.document;
+        selectedFilePath = document.uri.fsPath;
+        selectedDirectoryPath = path.dirname(selectedFilePath);
+        console.log(selectedFilePath,"...............",selectedDirectoryPath);
+        generateNewFile(selectedFilePath, selectedDirectoryPath);
+      } else {
+        if (!selectedDirectoryPath || !selectedFilePath) {
+          vscode.window.showErrorMessage('No directory or file selected.');
+          loadingIndicator.hide();
+          ready_to_load=1;
+          return;
+        }
+        generateNewFile(selectedFilePath, selectedDirectoryPath);
+
+      }
+    }
+    async function swanaitesting({ document }) {
+      const filePath = document.uri.fsPath;
+      const directoryPath = path.dirname(filePath);
+      await generateNewFile(filePath, directoryPath);
+    }
+    function generateNewFile(selectedFilePath, selectedDirectoryPath) {
+      // loadingIndicator.hide();
+
+      fs.readFile(selectedFilePath, 'utf-8', async (err, data) => {
+        if (err) {
+          vscode.window.showErrorMessage(`Error reading file: ${err.message}`);
+          loadingIndicator.hide();
+          ready_to_load=1;
+          return;
+        }
+        const newFileName = path.basename(selectedFilePath);
+        const extension = newFileName.split('.').pop().toLowerCase();
+        let language = '';
+        if (extension === 'py') {
+          language = 'python';
+        } else if (extension === 'js') {
+          language = 'javascript';
+        } else if (extension === 'ts') {
+          language = 'typescript';
+        } else if (extension === 'go') {
+          language = 'golang';
+        } else if (extension === 'java') {
+          language = 'java';
+        } else {
+          vscode.window.showErrorMessage('Unsupported file extension.');
+          loadingIndicator.hide();
+          ready_to_load=1;
+
+          return;
+        }
+
+        const UwBackPath = path.join(selectedDirectoryPath, `UwBack.${extension}`);
+        fs.writeFile(UwBackPath, data, async (err) => {
+          if (err) {
+            vscode.window.showErrorMessage(`Error writing file: ${err.message}`);
+            loadingIndicator.hide();
+            ready_to_load=1;
+
+            return;
+          }
+          vscode.window.showInformationMessage(`File ${UwBackPath} created successfully.`);
+          // loadingIndicator.hide();
+          await generateEdgeCasesAndCode(data, selectedDirectoryPath, language, selectedFilePath,UwBackPath);
+        });
+      });
+    }
+    context.subscriptions.push(disposable);
+
+    
+  }
+}
+const activate = async (context) => {
+  // once_registered=0;
+  let disposableCodeLens = vscode.languages.registerCodeLensProvider('*', {
+    provideCodeLenses(document, token) {
+      const codeLenses = [];
+      const regexMap = {
+        'python': /(?:class|def)\s+\w+/g,
+        'javascript': /(?:function|class)\s+\w+/g,
+        'typescript': /(?:function|class)\s+\w+/g,
+        'go': /(?:func|type|struct)\s+\w+/g,
+        'java': /public\s+(?:class|void)\s+\w+/g
+      };
+
+      const languageId = document.languageId;
+      const regex = regexMap[languageId];
+      if (!regex) {
+        return [];
+      }
+      let match;
+      while ((match = regex.exec(document.getText()))) {
+        const startPos = document.positionAt(match.index);
+        const endPos = document.positionAt(match.index + match[0].length);
+        const range = new vscode.Range(startPos, endPos);
+        if (codeLenses.some(cl => cl.range.isEqual(range))) {
+          continue; 
+      }
+        const command = {
+          title: "unitwise",
+          command: "extension.swanaitesting",
+          arguments: [{ document }]
+        };
+  
+        const codeLens = new vscode.CodeLens(range, command);
+        codeLenses.push(codeLens);
+     
+      }
+      return codeLenses;
+    }
+
+  });
+  context.subscriptions.push(disposableCodeLens);
+  vscode.commands.registerCommand('extension.showInputBox', async () => {
+    userId = await showInputBoxAndSave(context);
+    // userId = await retrieveInput(context);
+
+    if (userId.length > 0) {
+      mainFunctionAfteruserId(context);
+      vscode.window.showInformationMessage(`Now you can close this tab and Run Unitwise`);
+      vscode.window.showInformationMessage(`Token saved ${userId} successfully`);
+    }
+    else if(userId.length==0){
+      display_login_promotion_section(context);
+    } 
+  });
+  
+  // saveInput(context,"");
+  if (userId.length == 0) {
+    userId = await retrieveInput(context);
+    if (userId.length > 0) vscode.window.showInformationMessage(`Logged In successfully`);
+    if (userId.length == 0) {
+      display_login_promotion_section(context);
+    }
+  }
+  if (userId.length > 0) {
+    userId = await retrieveInput(context);
+
+    mainFunctionAfteruserId(context);
+  }
+}
+
+// ----------------------------------------------------------------
+//                    WEBVIEW / FRONTEND
+// ----------------------------------------------------------------
+
+function showResultsInWebView(edgeCases, generatedCode, UwRunPath, originalcode, selectedFilePath, language,command,UwBackPath) {
+  console.log(command);
+  generateMoreClicked = false;
+  ready_to_genmore=1;
+  const panel = vscode.window.createWebviewPanel(
+    'edgeCasesWebView',
+    'Edge Cases & Generated Code',
+    vscode.ViewColumn.Two,
+    {
+      enableScripts: true
+    }
+  );
+
+  let htmlContent = `
+  <!DOCTYPE html>
+  <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Edge Cases & Generated Code</title>
+      <script src="https://cdn.tailwindcss.com"></script>
+  
+      <link
+        rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
+        integrity="sha512-DTOQO9RWCH3ppGqcWaEA1BIZOC6xxalwEsw9c2QQeAIftl+Vegovlnee1c9QX4TctnWMn13TZye+giMm8e2LwA=="
+        crossorigin="anonymous"
+        referrerpolicy="no-referrer"
+      />
+      <link
+        rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/codemirror.css"
+      />
+      <link
+        rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/addon/merge/merge.css"
+      />
+      <link
+        rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/theme/dracula.css"
+      />
+  
+      <style>
+        * {
+          margin: 0;
+          padding: 0;
+          box-sizing: border-box;
+          color: white;
+          font-family: "Abhaya Libre ExtraBold";
+        }
+  
+        html,
+        body {
+          height: 100%;
+          width: 100%;
+          background-color: #0e0119;
+          font-family: Arial, sans-serif;
+        }
+  
+        .Generated-code,
+        .Edge-case {
+          display: none;
+        }
+  
+        .ActiveCont1 {
+          display: block;
+        }
+  
+        .ActiveBtn {
+          background-color: rgba(13, 72, 200, 0.824);
+        }
+  
+        .CodeMirror {
+          line-height: 1.2;
+        }
+  
+        @media screen and (min-width: 1300px) {
+          article {
+            max-width: 1000px;
+          }
+  
+          #nav {
+            border-right: 499px solid transparent;
+          }
+        }
+  
+        .CodeMirror {
+          line-height: 1.2;
+        }
+  
+        @media screen and (min-width: 1300px) {
+          article {
+            max-width: 1000px;
+          }
+  
+          #nav {
+            border-right: 499px solid transparent;
+          }
+        }
+  
+        .CodeMirror-merge-pane .CodeMirror-merge-editor {
+          width: 49% !important;
+        }
+  
+        .CodeMirror-merge .CodeMirror-code .CodeMirror-line > span {
+          margin-left: 30px;
+          /* Adjust the margin as needed */
+        }
+  
+        .CodeMirror-merge {
+          border: none;
+        }
+  
+        .CodeMirror-linewidget {
+          display: none;
+        }
+  
+        .CodeMirror-merge-editor .CodeMirror-merge-r-chunk-end {
+          border-bottom: 1px solid #0de306;
+        }
+  
+        .CodeMirror-merge-editor .CodeMirror-merge-r-chunk-start {
+          border-top: 1px solid #0de306;
+        }
+  
+        .CodeMirror-merge-editor .CodeMirror-merge-r-chunk {
+          background: #025020;
+        }
+  
+        .CodeMirror-merge-scrolllock-wrap {
+          display: none;
+        }
+  
+        .CodeMirror-merge-right .CodeMirror-merge-r-chunk-end {
+          border-bottom: 1px solid #de1818;
+        }
+  
+        .CodeMirror-merge-right .CodeMirror-merge-r-chunk-start {
+          border-top: 1px solid #e40f0f;
+        }
+  
+        .CodeMirror-merge-right .CodeMirror-merge-r-chunk {
+          background: #4e0101;
+        }
+  
+        .CodeMirror-merge-gap {
+          display: none;
+        }
+  
+        .CodeMirror-merge-2pane .CodeMirror-merge-pane {
+          width: 49%;
+          border: none;
+        }
+  
+        h1 {
+          font-size: 30px !important;
+          margin: 10px 0px !important;
+        }
+  
+        h2 {
+          font-size: 20px !important;
+          margin: 5px 0px !important;
+        }
+  
+        pre {
+          font-size: 15px !important;
+        }
+  
+        .CodeMirror-merge-r-inserted,
+        .CodeMirror-merge-l-inserted {
+          background-image: none;
+        }
+  
+        .CodeMirror-merge-r-deleted,
+        .CodeMirror-merge-l-deleted {
+          background-image: none;
+        }
+      </style>
+    </head>
+  
+    <body>
+      
+        <div class="m-2 flex gap-2 items-center">
+          <img
+            src="https://apiswan.github.io/downloads/unitwise-logo.png"
+            alt="image"
+          />
+          <span class="text-[25px]">UnitWise</span>
+        </div>
+        <div
+          class="w-full bg-gray-200 h-2 mt-2 mb-2 rounded-full overflow-hidden"
+        >
+          <div id="progressBar" class="h-full bg-blue-500"></div>
+        </div>
+        <div id="Cont1" style="display: block">
+          <div class="flex gap-2">
+            <button
+              class="TP1 ActiveBtn w-1/2 border-2 border-blue-500 hover:text-white hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-transform transform-gpu duration-300 flex items-center justify-center gap-2 mt-2"
+            >
+              Test Plan
+            </button>
+            <button
+              class="TP2 w-1/2 border-2 border-blue-500 hover:text-white hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-transform transform-gpu duration-300 flex items-center justify-center gap-2 mt-2"
+            >
+              Actual Plan
+            </button>
+          </div>
+          <div class="Edge-case ActiveCont1">
+        
+  
+            ${edgecases_used ? `
+            <h2>Previous Test Cases:</h2>
+            <pre
+              class="text-lg text-white overflow-x-auto bg-gray-900 border-5"
+              id="edgeCases"
+            >${edgecases_used}</pre>
+            ` : ''}
+  
+
+            <h2>New Test Cases:</h2>
+            <pre
+              class="text-lg text-white overflow-x-auto bg-gray-900 border-5"
+              id="newEdgeCases"
+            >${edgeCases}</pre>
+
+
+            <button
+                  class="showMoreEdgeCases bg-transparent border-2 rounded-full border-blue-500 hover:text-white hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-transform transform-gpu duration-300 flex items-center justify-center gap-2 mt-2"
+              >
+                <i class="fa-solid fa-caret-right"></i>
+                Generate More
+              </button>
+          </div>
+  
+          <div class="Generated-code">
+            <h1 class="text-[2rem] text-white mt-2">Generated Code:</h1>
+            <pre
+              class="text-white overflow-x-auto bg-gray-900 border-5"
+              id="generatedCode"
+            >${generatedCode}</pre>
+  
+            <div class="flex flex-col gap-5">
+
+            <div id="logs" style="display: none">
+            <h2>Logs</h2>
+            <pre id="logsPre" class="text-white overflow-x-auto bg-gray-900 border-5"></pre>
+            </div>
+
+            <div id="reasons" style="display: none">
+            <h2>Failure Reasons</h2>
+            <pre id="reasonsPre" class="text-white overflow-x-auto bg-gray-900 border-5"></pre>
+            </div>
+
+            <div id="fixedTest" style="display: none">
+            <h2>Fixed Test</h2>
+            <pre class="text-white overflow-x-auto bg-gray-900 border-5"
+            id="fixedTestPre"></pre>
+            </div>
+
+
+            </div>
+            <div class="nextBtns mt-2 flex gap-2 hidden" >
+              <button
+                id="showReasons"
+                class="bg-transparent border-2 rounded-full border-blue-500 hover:text-white hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-transform transform-gpu duration-300 flex items-center justify-center gap-2 mt-2 mb-2"
+              >
+                Show Failure Reasons
+              </button>
+  
+              <button
+                id="fixTestButton"
+                class="bg-transparent border-2 rounded-full border-blue-500 hover:text-white hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-transform transform-gpu duration-300 flex items-center justify-center gap-2 mt-2 mb-2"
+              >
+                Fix Test
+              </button>
+  
+              <button
+                id="fixCodeButton"
+                class="bg-transparent border-2 rounded-full border-blue-500 hover:text-white hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-transform transform-gpu duration-300 flex items-center justify-center gap-2 mt-2 mb-2"
+              >
+                Fix Code
+              </button>
+            </div>
+            
+            <div class="flex gap-2">
+            <button
+            id="showLogs"
+            class="bg-transparent border-2 rounded-full border-blue-500 hover:text-white hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-transform transform-gpu duration-300 flex items-center justify-center gap-2 mt-2"
+            >
+            <i class="fa-solid fa-caret-right"></i>
+            Run
+            </button>
+            
+              <button
+                class="showMoreEdgeCases bg-transparent border-2 rounded-full border-blue-500 hover:text-white hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-transform transform-gpu duration-300 flex items-center justify-center gap-2 mt-2"
+              >
+                <i class="fa-solid fa-caret-right"></i>
+                Generate More
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="R1" style="display: none">
+          <h1 class="text-[2rem]">Review Code :</h1>
+          <div class="flex justify-between">
+            <h2>Original Code</h2>
+            <h2>Fixed Original Code</h2>
+          </div>
+          <div id="view"></div>
+          <div id="originalCode" style="display: none">${originalcode}</div>
+          <div id="fixedOriginalCode" style="display: none">{fixedOriginalCode}</div>
+          <div class="btncont flex gap-5 justify-end mr-5">
+            <button
+              id="Cancel"
+              class="bg-transparent border-2 rounded-full border-blue-500 hover:text-white hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-transform transform-gpu duration-300 flex items-center justify-center gap-2 mt-2 align-right"
+            >
+              Back
+            </button>
+            <button
+              id="applyButton"
+              class="bg-transparent border-2 rounded-full border-blue-500 hover:text-white hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-transform transform-gpu duration-300 flex items-center justify-center gap-2 mt-2 align-right"
+            >
+              Apply
+            </button>
+          </div>
+        </div>
+     
+  
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/codemirror.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/mode/xml/xml.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/mode/css/css.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/mode/javascript/javascript.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/mode/htmlmixed/htmlmixed.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/diff_match_patch/20121119/diff_match_patch.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/addon/merge/merge.js"></script>
+  
+      <script>
+         const vscode = acquireVsCodeApi(); 
+
+
+
+        const displayReview = (fixedOriginalCode) => {
+
+          const originalCode = document.getElementById("originalCode").innerText;
+  
+          const value = originalCode;
+          const orig1 = null; // We're using 2 panes, so no need for orig1
+          const orig2 = fixedOriginalCode;
+  
+          const panes = 2;
+          const highlight = true;
+          const connect = "align";
+          const collapse = false;
+  
+          const target = document.getElementById("view");
+          target.innerHTML = "";
+  
+          const dv = CodeMirror.MergeView(target, {
+            value: value, 
+            orig: orig2,
+            lineNumbers: true,
+            mode: "javascript", // Change mode to "javascript" for proper syntax highlighting
+            highlightDifferences: highlight,
+            connect: connect,
+            collapseIdentical: collapse,
+            theme: "dracula",
+          });
+        };
+        
+        const TP1 = document.querySelector(".TP1");
+        const TP2 = document.querySelector(".TP2");
+
+        //generate more handle
+        const showMoreEdgeCasesbuttons = document.querySelectorAll(".showMoreEdgeCases");
+        showMoreEdgeCasesbuttons.forEach(button =>{
+          button.addEventListener('click',()=>{
+            vscode.postMessage({
+              command: "rerunExtension",
+            });
+          })
+        })
+
+
+
+
+        const showLogsButton = document.getElementById("showLogs");
+        const showReasonsButton = document.getElementById("showReasons");
+        const fixTestButton = document.getElementById("fixTestButton");
+        const fixCodeButton = document.getElementById("fixCodeButton");
+
+        const logsPre = document.getElementById("logsPre");
+        const reasonsPre = document.getElementById("reasonsPre");
+        const fixedOriginalCode = document.getElementById("fixedOriginalCode");
+        const fixedTestPre = document.getElementById("fixedTestPre");
+
+
+        const logs = document.getElementById("logs");
+        const reasons = document.getElementById("reasons");
+        const fixedTest = document.getElementById("fixedTest");
+
+        fixCodeButton.addEventListener("click", () => {
+          vscode.postMessage({ command: 'fixOrgCode' }); 
+        });
+
+        showLogsButton.addEventListener("click", () => {
+          vscode.postMessage({ command: "provideLogs" });
+        });
+  
+
+        showReasonsButton.addEventListener("click", () => {
+          vscode.postMessage({ command: "showfailurereason" });
+        });
+  
+        fixTestButton.addEventListener("click", () => {
+          vscode.postMessage({ command: "fixtest" });
+        });
+
+
+        window.addEventListener('message',async (event) => {
+          const message = event.data;
+          if(message.command==='showfailurereason'){
+            reasonsPre.innerText = message.result;
+            reasons.style.display = 'block';
+          }
+          else if(message.command==='fixtest'){
+            fixedTestPre.innerText = message.result;
+            fixedTest.style.display = 'block';
+            vscode.postMessage({
+            command: 'saveFixedTestCode',
+            content: message.result,
+        });
+        }
+        else if(message.command==='fixOrgCode'){
+          fixedOriginalCode.textContent = message.result;
+          document.getElementById("Cont1").style.display = "none";
+          document.getElementById("R1").style.display = "block";
+          displayReview(message.result);
+        }
+        else if(message.command==='handlelogs'){
+          logsPre.innerText = message.result;
+          logs.style.display = 'block';
+          const nextBtns = document.getElementsByClassName('nextBtns')[0];
+          nextBtns.classList.remove('hidden');
+        }
+        })
+
+
+        const progressBar = document.getElementById("progressBar");
+        const edgeCaseDiv = document.getElementsByClassName("Edge-case")[0];
+        const generatedCodeDiv =
+        document.getElementsByClassName("Generated-code")[0];
+  
+        // apply button
+        const applyButton = document.getElementById("applyButton");
+  
+        applyButton.addEventListener("click", () => {
+          const fixedOriginalCode = document.querySelector("#fixedOriginalCode");
+        
+          vscode.postMessage({
+            command: "applyFixedTestCode",
+            content: fixedOriginalCode.innerText,
+          });
+        });
+
+  
+        TP1.addEventListener("click", () => {
+          edgeCaseDiv.classList.add("ActiveCont1");
+          generatedCodeDiv.classList.remove("ActiveCont1");
+          TP1.classList.add("ActiveBtn");
+          TP2.classList.remove("ActiveBtn");
+        });
+  
+        document.getElementById("Cancel").addEventListener("click", function () {
+          // Hide the element with id "R1"
+          document.getElementById("R1").style.display = "none";
+          document.getElementById("Cont1").style.display = "block";
+        });
+  
+  
+        TP2.addEventListener("click", () => {
+          generatedCodeDiv.classList.add("ActiveCont1");
+          edgeCaseDiv.classList.remove("ActiveCont1");
+          TP2.classList.add("ActiveBtn");
+          TP1.classList.remove("ActiveBtn");
+        });
+
+      </script>
+    </body>
+  </html>
+  `;
+
+  panel.webview.html = htmlContent;
+
+  let logs;
+  panel.webview.onDidReceiveMessage(async message => {
+    switch (message.command) {
+      case 'saveFixedTestCode':
+        saveFixedTestCode(message.content, UwRunPath);
+        generatedCode=getFileContent(UwRunPath);
+        break;
+      case 'showfailurereason':
+        loadingIndicator.show();
+        const failReasons = await analyzeFailureReasons(generatedCode, logs, language);
+        console.log(failReasons);
+        panel.webview.postMessage({ command: 'showfailurereason', result: failReasons });
+        loadingIndicator.hide();
+        break;
+      case 'fixtest':
+        loadingIndicator.show();
+        const fixTest = await selectLang_generateFixtest(generatedCode, logs, language);
+        console.log(fixTest);
+        panel.webview.postMessage({ command: 'fixtest', result: fixTest });
+        loadingIndicator.hide();
+        break;
+      case 'fixOrgCode':
+        loadingIndicator.show();
+        const fixOrgCode = await selectLang_generateFixCode(originalcode, generatedCode, logs, language);
+        console.log(fixOrgCode);
+        panel.webview.postMessage({ command: 'fixOrgCode', result: fixOrgCode });
+        loadingIndicator.hide();
+        break;
+      case 'provideLogs':
+        loadingIndicator.show();
+        logs = "";
+        console.log("command", command);
+        exec(command, (error, stdout, stderr) => {
+          if (stdout) {
+            logs += stdout.toString();
+          }
+          if (stderr) {
+            logs += stderr.toString();
+          }
+          console.log("herere ", logs)
+          loadingIndicator.hide();
+          panel.webview.postMessage({ command: 'handlelogs', result: logs });
+        });
+        console.log("logs:", logs);
+        loadingIndicator.hide();
+        break;
+      case 'rerunExtension':
+        console.log('rerunExtension time',ready_to_load);
+        if(ready_to_load==1 && ready_to_genmore==1){
+          ready_to_genmore=0;
+          generateMoreClicked = true;
+          edgecases_used = edgecases_used + '\n' + edgeCases;
+          extra_test_case_count = extra_test_case_count + 3;
+          selectedDirectoryPath = selectedDirectoryPath;
+          selectedFilePath = selectedFilePath;
+          vscode.commands.executeCommand('extension.swanaitesting');
+        }
+        else{
+          vscode.window.showInformationMessage('Already Processing');
+        }
+        break;
+
+
+      case 'applyFixedTestCode':
+        saveFixedTestCode(message.content, selectedFilePath);
+        saveFixedTestCode(message.content, UwBackPath);
+        originalcode=getFileContent(selectedFilePath);
+        break;
+      default:
+        console.error('Unhandled message:', message);
+    }
+  });
+
+
+  function saveFixedTestCode(content, filePath) {
+    fs.writeFile(filePath, content, err => {
+      if (err) {
+        vscode.window.showErrorMessage(`Error saving fixed test code: ${err.message}`);
+        return;
+      }
+      vscode.window.showInformationMessage(`Fixed test code saved to: ${filePath}`);
+    });
+  }
+}
+
+function getFileContent(filePath) {
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return content;
+  } catch (error) {
+    console.error(`Error reading file ${filePath}: ${error}`);
+    return null;
+  }
+}
+
+module.exports = {
+  activate
+};
